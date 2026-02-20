@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""
+clean_transactions.py
+
+- Loads raw QuickCart JSONL logs
+- Archives them into MongoDB Atlas
+- Cleans and normalizes amounts
+- Filters test/incomplete transactions
+- Outputs clean CSV and JSON for reconciliation
+"""
+
+import json
+import re
+import pandas as pd
+from pymongo import MongoClient
+from urllib.parse import quote_plus
+
+# ------------------ CONFIGURE MONGODB ATLAS ------------------
+
+# Atlas credentials
+USERNAME = "hassan_theophilus"
+PASSWORD = "PWbNF6N5p4g0QFjZ"  # will be URL-encoded
+CLUSTER = "cluster0.xdmwxen.mongodb.net"  # your cluster hostname
+DB_NAME = "mongodbVSCodePlaygroundDB"
+
+# URL-encode the password to handle special characters
+USERNAME_ENC = quote_plus(USERNAME)
+PASSWORD_ENC = quote_plus(PASSWORD)
+
+# Connect to Atlas
+client = MongoClient(f"mongodb+srv://{USERNAME}:{PASSWORD}@{CLUSTER}/{DB_NAME}?retryWrites=true&w=majority")
+db = client[DB_NAME]
+collection = db["raw_transaction_logs"]
+
+#loading raw data from jsonl file
+
+RAW_FILE = "quickcart_data/raw_data.jsonl"
+
+raw_data = []
+with open(RAW_FILE, "r", encoding="utf-8") as f:
+    for line in f:
+        raw_data.append(json.loads(line))
+
+print(f"Total raw records loaded: {len(raw_data):,}")
+
+# Insert raw data into MongoDB Atlas
+
+collection.insert_many(raw_data)
+print(f"✅ Inserted {len(raw_data):,} raw logs into MongoDB Atlas")
+
+#Cleaning data and normalizing amounts
+
+def normalize_amount(value):
+    """Convert messy Amount field to float USD"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return round(value / 100, 2)
+    if isinstance(value, str):
+        clean = re.sub(r"[^0-9.]", "", value)
+        try:
+            return round(float(clean), 2)
+        except:
+            return None
+    return None
+
+clean_records = []
+
+for rec in raw_data:
+    payload = rec.get("payload", {})
+    entity = rec.get("entity", {})
+    event = rec.get("event", {})
+
+    amount_usd = normalize_amount(payload.get("Amount"))
+    order_id = entity.get("order", {}).get("id")
+    payment_id = entity.get("payment", {}).get("id")
+    status = payload.get("status")
+    flags = payload.get("flags")
+    ts = event.get("ts")
+
+    
+    is_test = flags and "test" in flags
+    if is_test or not amount_usd or (not order_id and not payment_id) or not status:
+        continue
+
+    clean_records.append({
+        "event_id": event.get("id"),
+        "order_id": order_id,
+        "payment_id": payment_id,
+        "amount_usd": amount_usd,
+        "status": status,
+        "flags": flags,
+        "ts": ts
+    })
+
+df_clean = pd.DataFrame(clean_records)
+print(f"✅ Clean records ready for analysis: {len(df_clean):,}")
+
+# ------------------ EXPORT CLEAN DATA ------------------
+
+CSV_OUT = "quickcart_data/clean_transactions.csv"
+JSON_OUT = "quickcart_data/clean_transactions.json"
+
+df_clean.to_csv(CSV_OUT, index=False)
+df_clean.to_json(JSON_OUT, orient="records", lines=True)
+
+print(f"✅ Clean transactions exported to:\n  - {CSV_OUT}\n  - {JSON_OUT}")
